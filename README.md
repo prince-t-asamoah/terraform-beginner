@@ -21,7 +21,6 @@ Along the way you will learn the basic Terraform workflow: `init`, `plan`, `appl
    aws configure
    ```
 3. **Terraform** (v1.5 or later): [install guide](https://developer.hashicorp.com/terraform/install)
-4. An **EC2 key pair** in your AWS region, so you can SSH into the instances. You can create one in the AWS Console under **EC2 → Key Pairs**.
 
 Check that the tools work:
 
@@ -38,6 +37,7 @@ aws sts get-caller-identity
 terraform_beginner/
 ├── provider.tf   # Tells Terraform to use AWS and which region
 ├── main.tf       # The EC2 instances, security group and Ubuntu AMI lookup
+├── output.tf     # Values printed after apply (IP addresses, etc.)
 └── README.md
 ```
 
@@ -45,9 +45,62 @@ terraform_beginner/
 
 ## Step-by-Step Instructions
 
-### Step 1: Configure the AWS provider
+### Step 1: Choose your AWS region
 
-Open `provider.tf` and set your region:
+Pick the AWS region **closest to you**. Resources there respond faster when you connect to them. Some examples:
+
+| Location           | Region code      |
+| ------------------ | ---------------- |
+| US East (Virginia) | `us-east-1`      |
+| US West (Oregon)   | `us-west-2`      |
+| Europe (Ireland)   | `eu-west-1`      |
+| Europe (London)    | `eu-west-2`      |
+| Europe (Frankfurt) | `eu-central-1`   |
+| Africa (Cape Town) | `af-south-1`     |
+| Asia (Singapore)   | `ap-southeast-1` |
+
+See the full list in the [AWS Regions documentation](https://docs.aws.amazon.com/global-infrastructure/latest/regions/aws-regions.html).
+
+> **Note:** some regions, such as `af-south-1`, are disabled by default and must be enabled in your AWS account first. Your company or sandbox account may also allow only certain regions.
+
+**Use the same region in every step below.** Key pairs and instances belong to a single region.
+
+### Step 2: Create a key pair (`.pem` file) in AWS
+
+You need a key pair to SSH into the instances. **Terraform does not create it for you.** Create it yourself in AWS, in the region you chose in Step 1.
+
+**Option A: AWS Console**
+
+1. Open the **EC2** console and select your region in the top-right corner.
+2. Go to **Network & Security → Key Pairs → Create key pair**.
+3. Fill in:
+   - **Name:** `ansible-key-pair`
+   - **Key pair type:** RSA
+   - **Private key file format:** `.pem`
+4. Click **Create key pair**. The `ansible-key-pair.pem` file downloads automatically.
+5. Move the file into this project folder.
+
+**Option B: AWS CLI** (Git Bash, macOS or Linux terminal). Replace `<your-region>`:
+
+```bash
+aws ec2 create-key-pair --key-name ansible-key-pair --region <your-region> \
+  --query "KeyMaterial" --output text > ansible-key-pair.pem
+chmod 400 ansible-key-pair.pem
+```
+
+Check that the file isn't empty:
+
+```bash
+head -1 ansible-key-pair.pem   # should print -----BEGIN RSA PRIVATE KEY-----
+```
+
+> **Important**
+> - AWS gives you the private key **only once**. If you lose the `.pem` file, you cannot download it again. You'll need to create a new key pair and recreate the instances.
+> - **Never commit `.pem` files to Git.** `.gitignore` in this project already excludes `*.pem`.
+
+### Step 3: Configure the AWS provider
+
+Open `provider.tf` and set **your** region from Step 1:
 
 ```hcl
 terraform {
@@ -60,13 +113,13 @@ terraform {
 }
 
 provider "aws" {
-  region = "us-east-1" # change to your preferred region
+  region = "<your-region>" # e.g. "eu-west-1", the region closest to you
 }
 ```
 
-### Step 2: Define the infrastructure
+### Step 4: Define the infrastructure
 
-Add the following to `main.tf`. Replace `my-key-pair` with the name of your EC2 key pair.
+Add the following to `main.tf`. `key_name` must match the name of the key pair you created in Step 2.
 
 ```hcl
 # Find the latest Ubuntu 24.04 LTS image published by Canonical
@@ -103,8 +156,8 @@ resource "aws_security_group" "ansible_sg" {
 # Controller node: Ansible is installed at boot
 resource "aws_instance" "ansible_controller" {
   ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "t2.micro"
-  key_name               = "my-key-pair"
+  instance_type          = "t3.micro"
+  key_name               = "ansible-key-pair" # created in Step 2
   vpc_security_group_ids = [aws_security_group.ansible_sg.id]
 
   user_data = <<-EOF
@@ -123,29 +176,33 @@ resource "aws_instance" "ansible_controller" {
 # Managed node: configured by Ansible from the controller
 resource "aws_instance" "ansible_managed" {
   ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "t2.micro"
-  key_name               = "my-key-pair"
+  instance_type          = "t3.micro"
+  key_name               = "ansible-key-pair" # created in Step 2
   vpc_security_group_ids = [aws_security_group.ansible_sg.id]
 
   tags = {
     Name = "ansible-manage-node"
   }
 }
+```
 
+Then add the outputs to `output.tf`:
+
+```hcl
 output "controller_public_ip" {
   value = aws_instance.ansible_controller.public_ip
 }
 
-output "managed_node_public_ip" {
+output "managed_public_ip" {
   value = aws_instance.ansible_managed.public_ip
 }
 
-output "managed_node_private_ip" {
+output "managed_private_ip" {
   value = aws_instance.ansible_managed.private_ip
 }
 ```
 
-### Step 3: Initialize Terraform
+### Step 5: Initialize Terraform
 
 This downloads the AWS provider plugin.
 
@@ -153,14 +210,14 @@ This downloads the AWS provider plugin.
 terraform init
 ```
 
-### Step 4: Format and validate
+### Step 6: Format and validate
 
 ```bash
 terraform fmt
 terraform validate
 ```
 
-### Step 5: Preview the changes
+### Step 7: Preview the changes
 
 Terraform shows what it will create without changing anything yet.
 
@@ -170,7 +227,7 @@ terraform plan
 
 You should see **3 resources to add**: one security group and two EC2 instances.
 
-### Step 6: Create the infrastructure
+### Step 8: Create the infrastructure
 
 ```bash
 terraform apply
@@ -178,36 +235,37 @@ terraform apply
 
 Type `yes` when prompted. When it finishes, Terraform prints the instance IP addresses.
 
-### Step 7: Verify Ansible on the controller
+### Step 9: Verify Ansible on the controller
 
 SSH into the controller (wait a minute or two for the install script to finish):
 
 ```bash
-ssh -i /path/to/my-key-pair.pem ubuntu@<controller_public_ip>
+ssh -i ansible-key-pair.pem ubuntu@<controller_public_ip>
 ansible --version
 ```
 
-### Step 8 (optional): Ping the managed node with Ansible
+### Step 10 (optional): Ping the managed node with Ansible
 
 1. Copy your private key to the controller (run this from your own machine):
    ```bash
-   scp -i /path/to/my-key-pair.pem /path/to/my-key-pair.pem ubuntu@<controller_public_ip>:~/.ssh/
+   scp -i ansible-key-pair.pem ansible-key-pair.pem ubuntu@<controller_public_ip>:~/.ssh/
    ```
-2. On the controller, create an inventory file:
+2. On the controller, protect the key, trust the managed node's host key, and create an inventory file:
    ```bash
-   chmod 400 ~/.ssh/my-key-pair.pem
+   chmod 400 ~/.ssh/ansible-key-pair.pem
+   ssh-keyscan -H <managed_private_ip> >> ~/.ssh/known_hosts
    cat > inventory.ini <<EOF
    [managed]
-   <managed_node_private_ip> ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/my-key-pair.pem
+   managed_node ansible_host=<managed_private_ip> ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/ansible-key-pair.pem ansible_python_interpreter=/usr/bin/python3
    EOF
    ```
 3. Ping it:
    ```bash
-   ansible all -i inventory.ini -m ping
+   ansible -i inventory.ini -m ping managed
    ```
    A `"ping": "pong"` reply means Ansible can manage the node.
 
-### Step 9: Clean up
+### Step 11: Clean up
 
 Remove everything so you don't get charged:
 
@@ -215,7 +273,11 @@ Remove everything so you don't get charged:
 terraform destroy
 ```
 
-Type `yes` when prompted.
+Type `yes` when prompted. The key pair was created outside Terraform, so delete it yourself if you no longer need it:
+
+```bash
+aws ec2 delete-key-pair --key-name ansible-key-pair --region <your-region>
+```
 
 ---
 
@@ -233,8 +295,22 @@ Type `yes` when prompted.
 
 ---
 
+## Troubleshooting
+
+| Error | Fix |
+| ----- | --- |
+| `InvalidKeyPair.NotFound` | The key pair doesn't exist in the region set in `provider.tf`. Create it in **that** region (Step 2). |
+| `UnauthorizedOperation ... service control policy` | Your organisation or sandbox blocks the request. Try `t3.micro`, or ask your admin which regions and instance types are allowed. |
+| SSH asks for a password | SSH isn't using your key. Check the `-i ansible-key-pair.pem` path. |
+| `Host key verification failed` (Ansible) | Run `ssh-keyscan -H <managed_private_ip> >> ~/.ssh/known_hosts` on the controller. |
+| `no such identity: ...pem` (Ansible) | The `.pem` path in `inventory.ini` doesn't match the file on the controller. Check with `ls ~/.ssh`. |
+| Can't connect after a stop/start | The public IP changes. Run `terraform apply -refresh-only` and then `terraform output`. |
+
+---
+
 ## Tips
 
 - Do **not** commit `terraform.tfstate`, `.terraform/` or `.pem` key files to Git.
-- `t2.micro` is Free Tier eligible in most regions. Run `terraform destroy` when you're finished anyway.
+- `t3.micro` is Free Tier eligible in many regions. Run `terraform destroy` when you're finished anyway.
 - If `ansible --version` fails right after `apply`, the boot script may still be running. Check its progress with `sudo tail -f /var/log/cloud-init-output.log`.
+- To leave an SSH session, type `exit`. `sudo shutdown now` **stops** the instance, and you'll have to start it again from AWS.
